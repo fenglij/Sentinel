@@ -27,15 +27,20 @@ import com.alibaba.csp.sentinel.dashboard.domain.vo.gateway.rule.AddFlowRuleReqV
 import com.alibaba.csp.sentinel.dashboard.domain.vo.gateway.rule.GatewayParamFlowItemVo;
 import com.alibaba.csp.sentinel.dashboard.domain.vo.gateway.rule.UpdateFlowRuleReqVo;
 import com.alibaba.csp.sentinel.dashboard.repository.gateway.InMemGatewayFlowRuleStore;
+import com.alibaba.csp.sentinel.dashboard.rule.DynamicRuleProvider;
+import com.alibaba.csp.sentinel.dashboard.rule.DynamicRulePublisher;
 import com.alibaba.csp.sentinel.util.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.util.CollectionUtils;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
+import java.util.Objects;
 
 import static com.alibaba.csp.sentinel.slots.block.RuleConstant.*;
 import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.*;
@@ -57,7 +62,12 @@ public class GatewayFlowRuleController {
     private InMemGatewayFlowRuleStore repository;
 
     @Autowired
-    private SentinelApiClient sentinelApiClient;
+    @Qualifier("gatewayFlowRulesNacosProvider")
+    private DynamicRuleProvider<List<GatewayFlowRuleEntity>> ruleProvider;
+
+    @Autowired
+    @Qualifier("gatewayFlowRulesNacosPublisher")
+    private DynamicRulePublisher<List<GatewayFlowRuleEntity>> rulePublisher;
 
     @GetMapping("/list.json")
     @AuthAction(AuthService.PrivilegeType.READ_RULE)
@@ -74,7 +84,31 @@ public class GatewayFlowRuleController {
         }
 
         try {
-            List<GatewayFlowRuleEntity> rules = sentinelApiClient.fetchGatewayFlowRules(app, ip, port).get();
+            //List<GatewayFlowRuleEntity> rules = sentinelApiClient.fetchGatewayFlowRules(app, ip, port).get();
+            List<GatewayFlowRuleEntity> rules = ruleProvider.getRules(app);
+            if (!CollectionUtils.isEmpty(rules)) {
+                for (GatewayFlowRuleEntity rule : rules) {
+                    rule.setApp(app.trim());
+                    rule.setIp(ip);
+                    rule.setPort(port);
+                    // intervalSec：统计时间窗口，单位是秒，默认是1秒
+                    if (Objects.isNull(rule.getInterval())) {
+                        rule.setInterval(1L);
+                    }
+                    if (Objects.isNull(rule.getIntervalUnit())) {
+                        rule.setIntervalUnit(INTERVAL_UNIT_SECOND);
+                    }
+                    // controlBehavior：流量整型的控制效果，同限流规则的 controlBehavior 字段
+                    // 目前支持快速失败和匀速排队两种模式，默认是快速失败
+                    if (Objects.isNull(rule.getControlBehavior())) {
+                        rule.setControlBehavior(0);
+                    }
+                    // burst：应对突发请求时额外允许的请求数目
+                    if (Objects.isNull(rule.getBurst())) {
+                        rule.setBurst(0);
+                    }
+                }
+            }
             repository.saveAll(rules);
             return Result.ofSuccess(rules);
         } catch (Throwable throwable) {
@@ -426,6 +460,12 @@ public class GatewayFlowRuleController {
 
     private boolean publishRules(String app, String ip, Integer port) {
         List<GatewayFlowRuleEntity> rules = repository.findAllByMachine(MachineInfo.of(app, ip, port));
-        return sentinelApiClient.modifyGatewayFlowRules(app, ip, port, rules);
+        //return sentinelApiClient.modifyGatewayFlowRules(app, ip, port, rules);
+        try {
+            rulePublisher.publish(app, rules);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }
